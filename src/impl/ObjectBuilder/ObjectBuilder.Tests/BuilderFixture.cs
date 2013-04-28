@@ -4,6 +4,7 @@ using System.Linq;
 using NServiceBus.ObjectBuilder.Autofac;
 using NServiceBus.ObjectBuilder.CastleWindsor;
 using NServiceBus.ObjectBuilder.Ninject;
+using NServiceBus.ObjectBuilder.SimpleInjector;
 using NServiceBus.ObjectBuilder.Spring;
 using NServiceBus.ObjectBuilder.StructureMap;
 using NServiceBus.ObjectBuilder.Unity;
@@ -16,7 +17,7 @@ using Ninject.Extensions.NamedScope;
 
 namespace ObjectBuilder.Tests
 {
-    public class BuilderFixture
+	public class BuilderFixture
     {
         protected virtual Action<IContainer> InitializeBuilder()
         {
@@ -49,12 +50,14 @@ namespace ObjectBuilder.Tests
             objectBuilders = new List<IContainer>
                                  {
                                      //add all supported builders here
-                                     new StructureMapObjectBuilder(new Container()),
+                                     new SimpleInjectorObjectBuilder(),
+									 new StructureMapObjectBuilder(new Container()),
                                      new AutofacObjectBuilder(),
                                      new WindsorObjectBuilder(),
                                      new UnityObjectBuilder(),
                                      new SpringObjectBuilder(),
                                      new NinjectObjectBuilder(new StandardKernel(new NinjectSettings{LoadExtensions = false}, new ContextPreservationModule(), new NamedScopeModule())),
+									 
                                  };
 
             DefaultInstances.Clear();
