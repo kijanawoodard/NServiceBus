@@ -3,6 +3,7 @@ using System.Collections.Generic;
 
 namespace NServiceBus.ObjectBuilder.SimpleInjector
 {
+	using System.Collections;
 	using System.Linq;
 	using System.Linq.Expressions;
 	using Common;
@@ -15,17 +16,16 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 	/// </summary>
 	public class SimpleInjectorObjectBuilder : IContainer
 	{
-		readonly object locker = new object();
-		bool locked;
+		private static readonly Lifestyle LifetimeScopeLifestyle = new LifetimeScopeLifestyle();
 
-		readonly Container container;
-		LifetimeScope scope;
-		bool disposed;
+		private readonly Container container;
+		private LifetimeScope scope;
 
 		///<summary>
 		/// Instantites the class with an empty SimpleInjector container.
 		///</summary>
-		public SimpleInjectorObjectBuilder() : this(null, null)
+		public SimpleInjectorObjectBuilder()
+			: this(new Container())
 		{
 		}
 
@@ -33,23 +33,21 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		/// Instantiates the class utilizing the given LifetimeScope.
 		///</summary>
 		///<param name="scope"></param>
-		public SimpleInjectorObjectBuilder(LifetimeScope scope) : this(null, scope)
+		public SimpleInjectorObjectBuilder(Container container)
 		{
+			if (container == null) throw new ArgumentNullException("container");
+
+			this.container = container;
+
+			this.container.EnableLifetimeScoping();
+
+			this.AutoResolveCollectionsWithNServiceBusTypes();
 		}
 
-		///<summary>
-		/// Instantiates the class utilizing the given container.
-		///</summary>
-		///<param name="container"></param>
-		///<param name="scope"></param>
 		private SimpleInjectorObjectBuilder(Container container, LifetimeScope scope)
 		{
-			this.container = container ?? new Container();
-			this.container.Options.PropertySelectionBehavior = new PropertyInjector(this.container); 
-			//this.container.Options.AllowOverridingRegistrations = true; 
-			this.container.EnableLifetimeScoping();
-			
-			this.scope = scope;// ?? this.container.BeginLifetimeScope();
+			this.container = container;
+			this.scope = scope;
 		}
 
 		public void Dispose()
@@ -63,22 +61,11 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		/// </summary>
 		protected virtual void Dispose(bool disposing)
 		{
-			if (disposed)
-			{
-				return;
-			}
-
 			if (disposing && scope != null)
 			{
 				scope.Dispose();
+				scope = null;
 			}
-
-			disposed = true;
-		}
-
-		~SimpleInjectorObjectBuilder()
-		{
-			Dispose(false);
 		}
 
 		///<summary>
@@ -88,14 +75,12 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		///<returns></returns>
 		public object Build(Type typeToBuild)
 		{
-			BeginLifetimeScope();
 			return container.GetInstance(typeToBuild);
 		}
 
 		public IContainer BuildChildContainer()
 		{
-			BeginLifetimeScope();
-			return new SimpleInjectorObjectBuilder();
+			return new SimpleInjectorObjectBuilder(this.container, this.container.BeginLifetimeScope());
 		}
 
 		///<summary>
@@ -105,79 +90,25 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		///<returns></returns>
 		public IEnumerable<object> BuildAll(Type typeToBuild)
 		{
-			BeginLifetimeScope();
-			var b = HasComponent(typeToBuild);
-			var reg = container.GetCurrentRegistrations().Where(x => x.ServiceType == typeToBuild).ToList();
-			var inst = container.GetInstance(typeToBuild);
-			yield return inst;
-
-			//TODO: This is hideousely broken: https://simpleinjector.codeplex.com/discussions/441869
-//			var result = container.GetAllInstances(typeToBuild).ToList();
-//			return result;
+			return this.container.GetAllInstances(typeToBuild);
 		}
 
 		public void Configure(Type component, DependencyLifecycle dependencyLifecycle)
 		{
-			var types = GetAllServices(component); //.Where(type => !HasComponent(type));
-			foreach (var type in types)
-			{
-				container.Register(type, component, Translate(dependencyLifecycle));
-			}
+			this.container.Register(component, component, ToLifestyle(dependencyLifecycle));
 		}
 
 		public void Configure<T>(Func<T> component, DependencyLifecycle dependencyLifecycle)
 		{
-			if (HasComponent(typeof (T)))
-				return;
-
-			//https://simpleinjector.codeplex.com/discussions/441823
+			// https://simpleinjector.codeplex.com/discussions/441823
 			var registration =
-				Translate(dependencyLifecycle)
-					.CreateRegistration(typeof (T), () => component(), container);
+				ToLifestyle(dependencyLifecycle)
+					.CreateRegistration(typeof(T), () => component(), container);
 
-			container.AddRegistration(typeof (T), registration);
-		}
-
-		static IEnumerable<Type> GetAllServices(Type type)
-		{
-			yield return type;
-
-			foreach (var @interface in type.GetInterfaces())
-			{
-				foreach (var service in GetAllServices(@interface))
-				{
-					yield return service;
-				}
-			}
-		}
-
-		Lifestyle Translate(DependencyLifecycle dependencyLifecycle)
-		{
-			switch (dependencyLifecycle)
-			{
-				case DependencyLifecycle.InstancePerCall:
-					return Lifestyle.Transient;
-				case DependencyLifecycle.SingleInstance:
-					return Lifestyle.Singleton;
-				case DependencyLifecycle.InstancePerUnitOfWork:
-					return new LifetimeScopeLifestyle(disposeInstanceWhenLifetimeScopeEnds: true);
-				default:
-					throw new ArgumentException("Unhandled lifecycle - " + dependencyLifecycle);
-			}
+			container.AddRegistration(typeof(T), registration);
 		}
 
 		public void ConfigureProperty(Type component, string property, object value)
-		{
-			if (value == null)
-			{
-				return;
-			}
-
-			ConfigureProperty(container, component, property, value);
-		}
-
-		private static void ConfigureProperty(Container container,
-		                                     Type component, string property, object value)
 		{
 			var prop = component.GetProperty(property);
 
@@ -186,21 +117,21 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 			if (!prop.PropertyType.IsInstanceOfType(value))
 				throw new ArgumentException("value type is incorrect", "value");
 
-			var actionType = typeof (Action<>).MakeGenericType(component);
+			var actionType = typeof(Action<>).MakeGenericType(component);
 
 			var parameter = Expression.Parameter(component);
 
 			var action = Expression.Lambda(actionType,
-			                               Expression.Assign(
-				                               Expression.Property(parameter, property),
-				                               Expression.Constant(value)),
-			                               parameter)
-			                       .Compile();
+				Expression.Assign(
+					Expression.Property(parameter, property),
+					Expression.Constant(value)),
+				parameter)
+				.Compile();
 
-			var initializer = typeof (Container).GetMethod("RegisterInitializer")
-			                                    .MakeGenericMethod(component);
+			var initializer = typeof(Container).GetMethod("RegisterInitializer")
+				.MakeGenericMethod(component);
 
-			initializer.Invoke(container, new[] {action});
+			initializer.Invoke(container, new[] { action });
 		}
 
 		///<summary>
@@ -215,25 +146,71 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 
 		public bool HasComponent(Type componentType)
 		{
-			return container.GetCurrentRegistrations().Any(x => x.ServiceType == componentType);
+			return container.GetRegistration(componentType) != null;
 		}
 
-		/// <summary>Prevents any new registrations to be made to the container.</summary>
-		internal void BeginLifetimeScope()
+		private Lifestyle ToLifestyle(DependencyLifecycle dependencyLifecycle)
 		{
-			if (!locked)
+			switch (dependencyLifecycle)
 			{
-				// By using a lock, we have the certainty that all threads will see the new value for 'locked'
-				// immediately, since ThrowWhenContainerIsLocked also locks on 'locker'.
-				lock (locker)
+				case DependencyLifecycle.InstancePerCall:
+					return Lifestyle.Transient;
+				case DependencyLifecycle.SingleInstance:
+					return Lifestyle.Singleton;
+				case DependencyLifecycle.InstancePerUnitOfWork:
+					return LifetimeScopeLifestyle;
+				default:
+					throw new ArgumentException("Unhandled lifecycle - " + dependencyLifecycle);
+			}
+		}
+
+		private void AutoResolveCollectionsWithNServiceBusTypes()
+		{
+			// This event gets triggered when an unregistered type gets resolved.
+			this.container.ResolveUnregisteredType += (s, e) =>
+			{
+				// We only handle IEnumerable<T>
+				if (e.UnregisteredServiceType.IsGenericType &&
+					e.UnregisteredServiceType.GetGenericTypeDefinition() == typeof(IEnumerable<>))
 				{
-					if (!locked)
+					Type elementType = e.UnregisteredServiceType.GetGenericArguments().Single();
+
+					// We only handle types T that are defined in an NServiceBus interface.
+					if (elementType.Namespace.StartsWith("NServiceBus"))
 					{
-						locked = true;
-						container.BeginLifetimeScope(); 
+						this.AddCollectionRegistration(e, elementType);
 					}
 				}
+			};
+		}
+
+		private void AddCollectionRegistration(UnregisteredTypeEventArgs e, Type elementType)
+		{
+			// Find all registrations in the container that implement or inherit from the given elementType.
+			// Calling ToArray() ensures this query is ran just once (crusial for performance).
+			var registrations = (
+				from registration in container.GetCurrentRegistrations()
+				where elementType.IsAssignableFrom(registration.ServiceType)
+				select registration)
+				.ToArray();
+
+			if (registrations.Any())
+			{
+				// Here we map the array of registrations to an enumerable of service instances (that are created
+				// dynamically. We don't call ToArray here; this way the lifestyle is preserved.
+				IEnumerable<object> collection =
+					registrations.Select(registration => registration.GetInstance());
+
+				// Register the collection in the container.
+				e.Register(Expression.Constant(CastCollection(collection, elementType)));
 			}
+		}
+
+		private static IEnumerable CastCollection(IEnumerable<object> collection, Type elementType)
+		{
+			var castMethod = typeof(Enumerable).GetMethod("Cast").MakeGenericMethod(elementType);
+
+			return (IEnumerable)castMethod.Invoke(null, new object[] { collection });
 		}
 	}
 }
