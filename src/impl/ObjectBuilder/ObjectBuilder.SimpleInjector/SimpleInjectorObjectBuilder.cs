@@ -4,8 +4,10 @@ using System.Collections.Generic;
 namespace NServiceBus.ObjectBuilder.SimpleInjector
 {
 	using System.Collections;
+	using System.Collections.Concurrent;
 	using System.Linq;
 	using System.Linq.Expressions;
+	using System.Threading;
 	using Common;
 	using global::SimpleInjector;
 	using global::SimpleInjector.Extensions;
@@ -40,14 +42,19 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 			this.container = container;
 
 			this.container.EnableLifetimeScoping();
+			this.container.Options.AllowOverridingRegistrations = true;
 
-			this.AutoResolveCollectionsWithNServiceBusTypes();
+//			this.AutoResolveCollectionsWithNServiceBusTypes();
+			_registrations = new ConcurrentDictionary<Type, HashSet<TypeRegistration>>();
+			_allRegistrations = new HashSet<Type>();
 		}
 
-		private SimpleInjectorObjectBuilder(Container container, LifetimeScope scope)
+		private SimpleInjectorObjectBuilder(Container container, LifetimeScope scope, HashSet<Type> allRegistrations)
 		{
 			this.container = container;
 			this.scope = scope;
+			_allRegistrations = allRegistrations;
+			_lock = 1;
 		}
 
 		public void Dispose()
@@ -75,12 +82,22 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		///<returns></returns>
 		public object Build(Type typeToBuild)
 		{
-			return container.GetInstance(typeToBuild);
+			EnsureRegistrations();
+			
+			if (!HasComponent(typeToBuild))
+				throw new ArgumentException(typeToBuild + " is not registered in the container");
+
+			var list = container.GetAllInstances(typeToBuild).ToList();
+			var result = list.Any() ? list.Last() : container.GetInstance(typeToBuild);
+			
+			return result;
 		}
 
 		public IContainer BuildChildContainer()
 		{
-			return new SimpleInjectorObjectBuilder(this.container, this.container.BeginLifetimeScope());
+			EnsureRegistrations();
+			
+			return new SimpleInjectorObjectBuilder(this.container, this.container.BeginLifetimeScope(), _allRegistrations);
 		}
 
 		///<summary>
@@ -90,12 +107,20 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		///<returns></returns>
 		public IEnumerable<object> BuildAll(Type typeToBuild)
 		{
-			return this.container.GetAllInstances(typeToBuild);
+			EnsureRegistrations();
+
+			var result = this.container.GetAllInstances(typeToBuild).ToList();
+			return result;
 		}
 
 		public void Configure(Type component, DependencyLifecycle dependencyLifecycle)
 		{
-			this.container.Register(component, component, ToLifestyle(dependencyLifecycle));
+			foreach (var type in GetAllServices(component))
+			{
+				AddRegistration(type, component, dependencyLifecycle);
+			}
+			
+//			this.container.Register(component, component, ToLifestyle(dependencyLifecycle));
 		}
 
 		public void Configure<T>(Func<T> component, DependencyLifecycle dependencyLifecycle)
@@ -106,6 +131,94 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 					.CreateRegistration(typeof(T), () => component(), container);
 
 			container.AddRegistration(typeof(T), registration);
+		}
+
+		private readonly ConcurrentDictionary<Type, HashSet<TypeRegistration>> _registrations;
+		readonly HashSet<Type> _allRegistrations; 
+		int _lock = 0;
+
+		private void AddRegistration(Type type, Type component, DependencyLifecycle dependencyLifecycle)
+		{
+			var typeRegistration = new TypeRegistration { Type = component, Lifestyle = ToLifestyle(dependencyLifecycle) };
+			_registrations
+				.AddOrUpdate(type
+							 , new HashSet<TypeRegistration> { typeRegistration }
+							 , (serviceType, set) =>
+							 {
+								 set.Add(typeRegistration);
+								 return set;
+							 });
+			_allRegistrations.Add(type);
+		}
+		private void EnsureRegistrations()
+		{
+			if (1 == Interlocked.Exchange(ref _lock, 1))
+				return;
+
+			//TODO: threading problem; we avoided locks but container might not be ready
+
+			foreach (var key in _registrations.Keys)
+			{
+				if (_registrations[key].Count == 1 && _registrations[key].First().Lifestyle == Lifestyle.Singleton)
+				{
+					container.RegisterSingle(key, _registrations[key].First().Type);
+				}
+//				else
+//				{
+//					container.RegisterAll(key, _registrations[key]);
+//				}
+
+				container.RegisterAll(key, _registrations[key].Select(x => x.Type));
+			}
+
+			container.Verify();
+		}
+
+		private class TypeRegistration
+		{
+			public Type Type { get; set; }
+			public Lifestyle Lifestyle { get; set; }
+
+			protected bool Equals(TypeRegistration other)
+			{
+				return Type.Equals(other.Type);
+			}
+
+			public override bool Equals(object obj)
+			{
+				if (ReferenceEquals(null, obj))
+				{
+					return false;
+				}
+				if (ReferenceEquals(this, obj))
+				{
+					return true;
+				}
+				if (obj.GetType() != this.GetType())
+				{
+					return false;
+				}
+				return Equals((TypeRegistration) obj);
+			}
+
+			public override int GetHashCode()
+			{
+				return Type.GetHashCode();
+			}
+		}
+
+
+		static IEnumerable<Type> GetAllServices(Type type)
+		{
+			yield return type;
+
+			foreach (var @interface in type.GetInterfaces())
+			{
+				foreach (var service in GetAllServices(@interface))
+				{
+					yield return service;
+				}
+			}
 		}
 
 		public void ConfigureProperty(Type component, string property, object value)
@@ -141,12 +254,34 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		///<param name="instance"></param>
 		public void RegisterSingleton(Type lookupType, object instance)
 		{
+//			container.RegisterAll(lookupType, new[]{instance});
 			container.RegisterSingle(lookupType, instance);
+			_allRegistrations.Add(lookupType);
 		}
 
 		public bool HasComponent(Type componentType)
 		{
+			return _allRegistrations.Contains(componentType);
+			var list = container.GetCurrentRegistrations().ToList();
+			return list.Any(x => GetUnderlyingType(x.ServiceType) == componentType);
 			return container.GetRegistration(componentType) != null;
+		}
+
+		private Type GetUnderlyingType(Type type)
+		{
+			var one = type.GetInterfaces().ToList();
+			var two = new[]{type}
+			              .Where(t => t.IsGenericType == true
+			                          && t.GetGenericTypeDefinition() == typeof (IEnumerable<>)).ToList();
+			var three = two
+			                .Select(t => t.GetGenericArguments()).ToList();
+			//http://stackoverflow.com/a/906513/214073
+			var result = new[] { type }
+			                 .Where(t => t.IsGenericType == true
+			                             && t.GetGenericTypeDefinition() == typeof (IEnumerable<>))
+			                 .Select(t => t.GetGenericArguments()[0])
+			                 .FirstOrDefault() ?? type;
+			return result;
 		}
 
 		private Lifestyle ToLifestyle(DependencyLifecycle dependencyLifecycle)

@@ -8,7 +8,9 @@ using NServiceBus.ObjectBuilder.CastleWindsor;
 
 namespace ObjectBuilder.Tests
 {
-    [TestFixture]
+	using NServiceBus.ObjectBuilder.SimpleInjector;
+
+	[TestFixture]
     public class When_building_components : BuilderFixture
     {
         [Test]
@@ -76,7 +78,7 @@ namespace ObjectBuilder.Tests
                                    Assert.NotNull(unregisteredComponent);
                                    Assert.NotNull(unregisteredComponent.SingletonComponent);
                                }
-               ,typeof(SpringObjectBuilder));
+			   , typeof(SpringObjectBuilder), typeof(SimpleInjectorObjectBuilder));
         }
 
  
