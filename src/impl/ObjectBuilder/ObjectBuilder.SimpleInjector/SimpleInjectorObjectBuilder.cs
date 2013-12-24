@@ -39,14 +39,17 @@ namespace NServiceBus.ObjectBuilder.SimpleInjector
 		{
 			if (container == null) throw new ArgumentNullException("container");
 
-			this.container = container;
-
-			this.container.EnableLifetimeScoping();
-			this.container.Options.AllowOverridingRegistrations = true;
-
-//			this.AutoResolveCollectionsWithNServiceBusTypes();
 			_registrations = new ConcurrentDictionary<Type, HashSet<TypeRegistration>>();
 			_allRegistrations = new HashSet<Type>();
+
+			this.container = container;
+
+			this.container.Options.PropertySelectionBehavior = new PropertyInjector(HasComponent);
+			this.container.Options.AllowOverridingRegistrations = true;
+
+			this.container.EnableLifetimeScoping();
+			
+//			this.AutoResolveCollectionsWithNServiceBusTypes();
 		}
 
 		private SimpleInjectorObjectBuilder(Container container, LifetimeScope scope, HashSet<Type> allRegistrations)

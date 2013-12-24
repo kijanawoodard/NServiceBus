@@ -26,7 +26,7 @@ namespace NServiceBus.ObjectBuilder.Autofac
         ///<param name="container"></param>
         public AutofacObjectBuilder(ILifetimeScope container)
         {
-            this.container = container ?? new ContainerBuilder().Build();
+            this.container = container ?? new ContainerBuilder().Build().BeginLifetimeScope();
         }
 
         ///<summary>

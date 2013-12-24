@@ -7,16 +7,16 @@
 
 	public class PropertyInjector : IPropertySelectionBehavior
 	{
-		readonly Container container;
+		readonly Func<Type, bool> hasComponent;
 
-		public PropertyInjector(Container container)
+		public PropertyInjector(Func<Type, bool> hasComponent)
 		{
-			this.container = container;
+			this.hasComponent = hasComponent;
 		}
 
 		public bool SelectProperty(Type serviceType, PropertyInfo propertyInfo)
 		{
-			return this.container.GetRegistration(propertyInfo.PropertyType, false) != null;
+			return hasComponent(propertyInfo.PropertyType);
 		}
 	}
 }
